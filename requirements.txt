@@ -17,7 +17,8 @@ gradio_client==1.4.3
 imageio==2.36.0
 imageio-ffmpeg==0.5.1
 numpy==1.26.4
-onnxruntime-gpu==1.20.1
+# onnxruntime-gpu==1.20.1
+onnxruntime-gpu==1.16.3
 open-clip-torch==2.29.0
 opencv-contrib-python==4.10.0.84
 Pillow>=10.4.0
