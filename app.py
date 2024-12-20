@@ -274,4 +274,4 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(inbrowser=True)
+    demo.launch(inbrowser=True, node_server_name="0.0.0.0", server_name="0.0.0.0")
