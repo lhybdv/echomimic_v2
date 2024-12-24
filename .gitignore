@@ -133,3 +133,5 @@ cython_debug/
 #.idea/
 
 pretrained_weights/
+outputs/
+assets/**/aligned.*
