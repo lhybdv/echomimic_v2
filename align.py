@@ -1,35 +1,37 @@
-refimg_path = './assets/jinan/jinan_female_2.png'
-audio_path ='./assets/jinan/yubao.wav'
-using_video_driving = False
-if not using_video_driving:
-  pose_path = './assets/halfbody_demo/pose/01'
-
-import copy
+import argparse
 import os
-import pathlib
-import pickle
-import sys
-from glob import glob
+import random
+import time
 from multiprocessing.pool import ThreadPool
+from pathlib import Path
 
 import cv2
 import decord
 import numpy as np
 import torch
-from IPython import embed
+from diffusers import AutoencoderKL, DDIMScheduler
 from moviepy.editor import AudioFileClip, VideoFileClip
+from omegaconf import OmegaConf
 from PIL import Image
-from tqdm import tqdm
 
 from src.models.dwpose.dwpose_detector import dwpose_detector as dwprocessor
-from src.models.dwpose.util import draw_pose
-from src.utils.img_utils import (center_crop_cv2, cv2_to_pil, pil_to_cv2,
-                                 pils_from_video, save_video_from_cv2_list,
-                                 save_videos_from_pils)
-from src.utils.motion_utils import motion_sync
+from src.models.pose_encoder import PoseEncoder
+from src.models.unet_2d_condition import UNet2DConditionModel
+from src.models.unet_3d_emo import EMOUNet3DConditionModel
+from src.models.whisper.audio2feature import load_audio_model
+from src.pipelines.pipeline_echomimicv2 import EchoMimicV2Pipeline
+from src.utils.dwpose_util import draw_pose_select_v2
+from src.utils.util import save_videos_grid
+
+refimg_path = "./assets/halfbody_demo/refimag/test.png"
+audio_path = "./assets/halfbody_demo/audio/chinese/echomimicv2_woman.wav"
+using_video_driving = False
+if not using_video_driving:
+    pose_path = "./assets/halfbody_demo/pose/01"
+
 
 ##################################
-process_num = 100 #1266
+process_num = 100  # 1266
 
 start = 0
 end = process_num + start
@@ -44,9 +46,9 @@ def convert_fps(src_path, tgt_path, tgt_fps=24, tgt_sr=16000):
         audio = new_clip.audio
         audio = audio.set_fps(tgt_sr)
         new_clip = new_clip.set_audio(audio)
-    if '.mov' in tgt_path:
-        tgt_path = tgt_path.replace('.mov', '.mp4')
-    new_clip.write_videofile(tgt_path, codec='libx264', audio_codec='aac')
+    if ".mov" in tgt_path:
+        tgt_path = tgt_path.replace(".mov", ".mp4")
+    new_clip.write_videofile(tgt_path, codec="libx264", audio_codec="aac")
 
 
 def get_video_pose(video_path: str, sample_stride: int = 1, max_frame=None):
@@ -57,7 +59,7 @@ def get_video_pose(video_path: str, sample_stride: int = 1, max_frame=None):
     frames = vr.get_batch(list(range(0, len(vr), sample_stride))).asnumpy()
     # print(frames[0])
     if max_frame is not None:
-        frames = frames[0:max_frame,:,:]
+        frames = frames[0:max_frame, :, :]
     height, width, _ = frames[0].shape
     detected_poses = [dwprocessor(frm) for frm in frames]
     dwprocessor.release_memory()
@@ -66,7 +68,7 @@ def get_video_pose(video_path: str, sample_stride: int = 1, max_frame=None):
 
 
 def resize_and_pad(img, max_size):
-    img_new = np.zeros((max_size, max_size, 3)).astype('uint8')
+    img_new = np.zeros((max_size, max_size, 3)).astype("uint8")
     imh, imw = img.shape[0], img.shape[1]
     half = max_size // 2
     if imh > imw:
@@ -85,7 +87,7 @@ def resize_and_pad(img, max_size):
         re = rb + imh_new
 
     img_resize = cv2.resize(img, (imw_new, imh_new))
-    img_new[rb:re,cb:ce,:] = img_resize
+    img_new[rb:re, cb:ce, :] = img_resize
     return img_new
 
 
@@ -107,31 +109,35 @@ def resize_and_pad_param(imh, imw, max_size):
         cb, ce = 0, max_size
         rb = half - half_h
         re = rb + imh_new
-        
+
     return imh_new, imw_new, rb, re, cb, ce
 
 
 def get_pose_params(detected_poses, max_size):
-    print('get_pose_params...')
-    # pose rescale 
+    print("get_pose_params...")
+    # pose rescale
     w_min_all, w_max_all, h_min_all, h_max_all = [], [], [], []
     mid_all = []
     for num, detected_pose in enumerate(detected_poses):
-        detected_poses[num]['num'] = num
-        candidate_body = detected_pose['bodies']['candidate']
-        score_body = detected_pose['bodies']['score']
-        candidate_face = detected_pose['faces']
-        score_face = detected_pose['faces_score']
-        candidate_hand = detected_pose['hands']
-        score_hand = detected_pose['hands_score']
+        detected_poses[num]["num"] = num
+        candidate_body = detected_pose["bodies"]["candidate"]
+        score_body = detected_pose["bodies"]["score"]
+        candidate_face = detected_pose["faces"]
+        score_face = detected_pose["faces_score"]
+        candidate_hand = detected_pose["hands"]
+        score_hand = detected_pose["hands_score"]
 
         # face
         if candidate_face.shape[0] > 1:
             index = 0
             candidate_face = candidate_face[index]
             score_face = score_face[index]
-            detected_poses[num]['faces'] = candidate_face.reshape(1, candidate_face.shape[0], candidate_face.shape[1])
-            detected_poses[num]['faces_score'] = score_face.reshape(1, score_face.shape[0])
+            detected_poses[num]["faces"] = candidate_face.reshape(
+                1, candidate_face.shape[0], candidate_face.shape[1]
+            )
+            detected_poses[num]["faces_score"] = score_face.reshape(
+                1, score_face.shape[0]
+            )
         else:
             candidate_face = candidate_face[0]
             score_face = score_face[0]
@@ -142,10 +148,10 @@ def get_pose_params(detected_poses, max_size):
             for k in range(0, score_body.shape[0]):
                 tmp_score.append(score_body[k].mean())
             index = np.argmax(tmp_score)
-            candidate_body = candidate_body[index * 18:(index + 1) * 18, :]
+            candidate_body = candidate_body[index * 18 : (index + 1) * 18, :]
             score_body = score_body[index]
-            score_hand = score_hand[(index * 2):(index * 2 + 2), :]
-            candidate_hand = candidate_hand[(index * 2):(index * 2 + 2), :, :]
+            score_hand = score_hand[(index * 2) : (index * 2 + 2), :]
+            candidate_hand = candidate_hand[(index * 2) : (index * 2 + 2), :, :]
         else:
             score_body = score_body[0]
         all_pose = np.concatenate((candidate_body, candidate_face))
@@ -161,11 +167,11 @@ def get_pose_params(detected_poses, max_size):
         h_min, h_max = np.min(face_pose[:, 1]), np.max(body_pose[:7, 1])
 
         h_ = h_max - h_min
-        
+
         mid_w = mid_
         w_min = mid_w - h_ // 2
         w_max = mid_w + h_ // 2
-        
+
         w_min_all.append(w_min)
         w_max_all.append(w_max)
         h_min_all.append(h_min)
@@ -180,7 +186,7 @@ def get_pose_params(detected_poses, max_size):
 
     margin_ratio = 0.25
     h_margin = (h_max - h_min) * margin_ratio
-    
+
     h_min = max(h_min - h_margin * 0.8, 0)
     h_max = min(h_max + h_margin * 0.1, 1)
 
@@ -189,7 +195,7 @@ def get_pose_params(detected_poses, max_size):
     h_min_real = int(h_min * height)
     h_max_real = int(h_max * height)
     mid_real = int(mid * width)
-    
+
     height_new = h_max_real - h_min_real + 1
     width_new = height_new
     w_min_real = mid_real - width_new // 2
@@ -201,41 +207,46 @@ def get_pose_params(detected_poses, max_size):
     w_min = w_min_real / width
     w_max = w_max_real / width
 
-    imh_new, imw_new, rb, re, cb, ce = resize_and_pad_param(height_new, width_new, max_size)
-    res = {'draw_pose_params': [imh_new, imw_new, rb, re, cb, ce], 
-           'pose_params': [w_min, w_max, h_min, h_max],
-           'video_params': [h_min_real, h_max_real, w_min_real, w_max_real],
-           }
+    imh_new, imw_new, rb, re, cb, ce = resize_and_pad_param(
+        height_new, width_new, max_size
+    )
+    res = {
+        "draw_pose_params": [imh_new, imw_new, rb, re, cb, ce],
+        "pose_params": [w_min, w_max, h_min, h_max],
+        "video_params": [h_min_real, h_max_real, w_min_real, w_max_real],
+    }
     return res
 
 
 def save_pose_params_item(input_items):
     detected_pose, pose_params, draw_pose_params, save_dir = input_items
     w_min, w_max, h_min, h_max = pose_params
-    num = detected_pose['num']
-    candidate_body = detected_pose['bodies']['candidate']
-    candidate_face = detected_pose['faces'][0]
-    candidate_hand = detected_pose['hands']
+    num = detected_pose["num"]
+    candidate_body = detected_pose["bodies"]["candidate"]
+    candidate_face = detected_pose["faces"][0]
+    candidate_hand = detected_pose["hands"]
     candidate_body[:, 0] = (candidate_body[:, 0] - w_min) / (w_max - w_min)
     candidate_body[:, 1] = (candidate_body[:, 1] - h_min) / (h_max - h_min)
     candidate_face[:, 0] = (candidate_face[:, 0] - w_min) / (w_max - w_min)
     candidate_face[:, 1] = (candidate_face[:, 1] - h_min) / (h_max - h_min)
     candidate_hand[:, :, 0] = (candidate_hand[:, :, 0] - w_min) / (w_max - w_min)
     candidate_hand[:, :, 1] = (candidate_hand[:, :, 1] - h_min) / (h_max - h_min)
-    detected_pose['bodies']['candidate'] = candidate_body
-    detected_pose['faces'] = candidate_face.reshape(1, candidate_face.shape[0], candidate_face.shape[1])
-    detected_pose['hands'] = candidate_hand
-    detected_pose['draw_pose_params'] = draw_pose_params
-    np.save(save_dir + '/' + str(num) + '.npy', detected_pose)
+    detected_pose["bodies"]["candidate"] = candidate_body
+    detected_pose["faces"] = candidate_face.reshape(
+        1, candidate_face.shape[0], candidate_face.shape[1]
+    )
+    detected_pose["hands"] = candidate_hand
+    detected_pose["draw_pose_params"] = draw_pose_params
+    np.save(save_dir + "/" + str(num) + ".npy", detected_pose)
 
 
 def save_pose_params(detected_poses, pose_params, draw_pose_params, ori_video_path):
-    save_dir = ori_video_path.replace('video', 'pose/')
+    save_dir = ori_video_path.replace("video", "pose/")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     input_list = []
-    
+
     for i, detected_pose in enumerate(detected_poses):
         input_list.append([detected_pose, pose_params, draw_pose_params, save_dir])
 
@@ -244,8 +255,6 @@ def save_pose_params(detected_poses, pose_params, draw_pose_params, ori_video_pa
     pool.close()
     pool.join()
     return save_dir
-
-from torchvision.transforms import functional as F
 
 
 def get_img_pose(img_path: str, sample_stride: int = 1, max_frame=None):
@@ -266,91 +275,40 @@ def save_aligned_img(ori_frame, video_params, max_size):
     h_min_real, h_max_real, w_min_real, w_max_real = video_params
     img = ori_frame[h_min_real:h_max_real, w_min_real:w_max_real, :]
     img_aligened = resize_and_pad(img, max_size=max_size)
-    print('aligned img shape:', img_aligened.shape)
-    save_dir = './assets/refimg_aligned'
+    print("aligned img shape:", img_aligened.shape)
+    save_dir = "./assets/refimg_aligned"
 
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, 'aligned.png')
+    save_path = os.path.join(save_dir, "aligned.png")
     cv2.imwrite(save_path, img_aligened)
     return save_path
 
 
+start = time.time()
 detected_poses, height, width, ori_frame = get_img_pose(refimg_path, max_frame=None)
+end = time.time()
+print(f"get_img_pose: {end-start}")
+start = time.time()
 res_params = get_pose_params(detected_poses, MAX_SIZE)
-refimg_aligned_path = save_aligned_img(ori_frame, res_params['video_params'], MAX_SIZE)
+end = time.time()
+print(f"get_pose_params: {end-start}")
+start = time.time()
+refimg_aligned_path = save_aligned_img(ori_frame, res_params["video_params"], MAX_SIZE)
+end = time.time()
+print(f"save_aligned_img: {end-start}")
 
-video_dir = './assets/'
-video_name = 'green_screen'
-
-if using_video_driving:
-    base_dir = video_dir
-    tasks = [video_name]
-    visualization = False
-    for sub_task in tasks:
-        ori_list = os.listdir(base_dir+sub_task)
-        new_dir = base_dir + sub_task+'_24fps'
-        if not os.path.exists(new_dir):
-            os.makedirs(new_dir)
-        index = 1
-        for i, mp4_file in enumerate(ori_list):
-            ori_video_path = base_dir + sub_task+'/'+mp4_file
-            if ori_video_path[-3:]=='mp4':
-                try:
-                    # convert to 24fps
-                    ori_video_path_new = ori_video_path.replace(sub_task, sub_task+'_24fps')
-                    if '.MOV' in ori_video_path_new:
-                        ori_video_path_new.replace('.MOV', '.mp4')
-                    convert_fps(ori_video_path, ori_video_path_new)
-                    # extract pose
-                    detected_poses, height, width, ori_frames = get_video_pose(ori_video_path_new, max_frame=None)
-                    # parameterize pose
-                    res_params = get_pose_params(detected_poses, MAX_SIZE)
-                    # save pose to npy
-                    pose_path = save_pose_params(detected_poses, res_params['pose_params'], res_params['draw_pose_params'], ori_video_path)
-                    
-                    index += 1
-                    
-                except:
-                    print("extract crash!")
-                    continue 
-
-    print(["All Finished", sub_task, start, end])
-
-import argparse
-import os
-import random
-import sys
-from datetime import datetime
-from pathlib import Path
-
-import numpy as np
-import torch
-from decord import VideoReader
-from diffusers import AutoencoderKL, DDIMScheduler
-from einops import repeat
-from moviepy.editor import AudioFileClip, VideoFileClip
-from omegaconf import OmegaConf
-from PIL import Image
-
-from src.models.pose_encoder import PoseEncoder
-from src.models.unet_2d_condition import UNet2DConditionModel
-from src.models.unet_3d_emo import EMOUNet3DConditionModel
-from src.models.whisper.audio2feature import load_audio_model
-from src.pipelines.pipeline_echomimicv2 import EchoMimicV2Pipeline
-from src.utils.dwpose_util import draw_pose_select_v2
-from src.utils.util import save_videos_grid
-
-os.environ['FFMPEG_PATH'] = './ffmpeg-4.4-amd64-static'
-ffmpeg_path = os.getenv('FFMPEG_PATH')
+ffmpeg_path = os.getenv("FFMPEG_PATH")
 
 if ffmpeg_path is None:
-    print("please download ffmpeg-static and export to FFMPEG_PATH. \nFor example: export FFMPEG_PATH=./ffmpeg-4.4-amd64-static")
-elif ffmpeg_path not in os.getenv('PATH'):
+    print(
+        "please download ffmpeg-static and export to FFMPEG_PATH. \nFor example: export FFMPEG_PATH=./ffmpeg-4.4-amd64-static"
+    )
+elif ffmpeg_path not in os.getenv("PATH"):
     print("add ffmpeg to path")
     os.environ["PATH"] = f"{ffmpeg_path}:{os.environ['PATH']}"
 
 
-
+start = time.time()
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, default="./configs/prompts/infer.yaml")
 parser.add_argument("-W", type=int, default=768)
@@ -366,15 +324,20 @@ parser.add_argument("--steps", type=int, default=30)
 parser.add_argument("--sample_rate", type=int, default=16000)
 parser.add_argument("--fps", type=int, default=24)
 parser.add_argument("--device", type=str, default="cuda")
-parser.add_argument("--ref_images_dir", type=str, default=f'./assets/halfbody_demo/refimag')
+parser.add_argument(
+    "--ref_images_dir", type=str, default="./assets/halfbody_demo/refimag"
+)
 parser.add_argument("--pose_dir", type=str, default=None)
-parser.add_argument("--refimg_name", type=str, default='natural_bk_openhand/0035.png')
+parser.add_argument("--refimg_name", type=str, default="natural_bk_openhand/0035.png")
 parser.add_argument("--pose_name", type=str, default="01")
 parser.add_argument("--video_dir", type=str, default="./assets/halfbody_demo/video")
 
 args, _ = parser.parse_known_args()
-     
+end = time.time()
+print(f"parse_known_args: {end-start}")
 
+
+start = time.time()
 config = OmegaConf.load(args.config)
 if config.weight_dtype == "fp16":
     weight_dtype = torch.float16
@@ -388,26 +351,36 @@ if device.__contains__("cuda") and not torch.cuda.is_available():
 inference_config_path = config.inference_config
 infer_config = OmegaConf.load(inference_config_path)
 
-model_flag = '{}-iter{}'.format(config.motion_module_path.split('/')[-2], config.motion_module_path.split('/')[-1].split('-')[-1][:-4])
+model_flag = "{}-iter{}".format(
+    config.motion_module_path.split("/")[-2],
+    config.motion_module_path.split("/")[-1].split("-")[-1][:-4],
+)
 save_dir = Path(f"outputs/{model_flag}-seed{args.seed}/")
 save_dir.mkdir(exist_ok=True, parents=True)
 print(save_dir)
 
+end = time.time()
+print(f"load_config_save_seed: {end-start}")
+
+start = time.time()
 ############# model_init started #############
 ## vae init
 vae = AutoencoderKL.from_pretrained(
-    config.pretrained_vae_path,).to(device, dtype=weight_dtype)
+    config.pretrained_vae_path,
+).to(device, dtype=weight_dtype)
 
 ## reference net init
 reference_unet = UNet2DConditionModel.from_pretrained(
     config.pretrained_base_model_path,
-    subfolder="unet",).to(dtype=weight_dtype, device=device)
+    subfolder="unet",
+).to(dtype=weight_dtype, device=device)
 reference_unet.load_state_dict(
-    torch.load(config.reference_unet_path, map_location="cpu"),)
+    torch.load(config.reference_unet_path, map_location="cpu"),
+)
 
 ## denoising net init
 if os.path.exists(config.motion_module_path):
-    print('using motion module')
+    print("using motion module")
 else:
     exit("motion module not found")
     ### stage1 + stage2
@@ -415,22 +388,26 @@ denoising_unet = EMOUNet3DConditionModel.from_pretrained_2d(
     config.pretrained_base_model_path,
     config.motion_module_path,
     subfolder="unet",
-    unet_additional_kwargs=infer_config.unet_additional_kwargs,).to(dtype=weight_dtype, device=device)
+    unet_additional_kwargs=infer_config.unet_additional_kwargs,
+).to(dtype=weight_dtype, device=device)
 
 denoising_unet.load_state_dict(
-    torch.load(config.denoising_unet_path, map_location="cpu"),
-    strict=False)
+    torch.load(config.denoising_unet_path, map_location="cpu"), strict=False
+)
 
 # pose net init
-pose_net = PoseEncoder(320, conditioning_channels=3, block_out_channels=(16, 32, 96, 256)).to(
-    dtype=weight_dtype, device=device)
+pose_net = PoseEncoder(
+    320, conditioning_channels=3, block_out_channels=(16, 32, 96, 256)
+).to(dtype=weight_dtype, device=device)
 pose_net.load_state_dict(torch.load(config.pose_encoder_path))
 
 ### load audio processor params
 audio_processor = load_audio_model(model_path=config.audio_model_path, device=device)
 
+end = time.time()
+print(f"load_module: {end-start}")
 ############# model_init finished #############
-width, height = 768, 768 # fixed size
+width, height = 768, 768  # fixed size
 sched_kwargs = OmegaConf.to_container(infer_config.noise_scheduler_kwargs)
 scheduler = DDIMScheduler(**sched_kwargs)
 
@@ -440,15 +417,19 @@ pipe = EchoMimicV2Pipeline(
     denoising_unet=denoising_unet,
     audio_guider=audio_processor,
     pose_encoder=pose_net,
-    scheduler=scheduler,)
+    scheduler=scheduler,
+)
 
+start = time.time()
 pipe = pipe.to(device, dtype=weight_dtype)
-     
+
+end = time.time()
+print(f"pipe: {end-start}")
 
 if args.seed is not None and args.seed > -1:
-  generator = torch.manual_seed(args.seed)
+    generator = torch.manual_seed(args.seed)
 else:
-  generator = torch.manual_seed(random.randint(100, 1000000))
+    generator = torch.manual_seed(random.randint(100, 1000000))
 
 final_fps = args.fps
 
@@ -460,44 +441,52 @@ inputs_dict = {
 
 start_idx = 0
 
-print('Pose:', inputs_dict['pose'])
-print('Reference:', inputs_dict['refimg'])
-print('Audio:', inputs_dict['audio'])
-audio_name = inputs_dict['audio'].split('/')[-1].split('.')[0]
+print("Pose:", inputs_dict["pose"])
+print("Reference:", inputs_dict["refimg"])
+print("Audio:", inputs_dict["audio"])
+audio_name = inputs_dict["audio"].split("/")[-1].split(".")[0]
 
-ref_flag = '.'.join([inputs_dict['refimg'].split('/')[-2], inputs_dict['refimg'].split('/')[-1]])
-save_path = Path(f"outputs")
+ref_flag = ".".join(
+    [inputs_dict["refimg"].split("/")[-2], inputs_dict["refimg"].split("/")[-1]]
+)
+save_path = Path("outputs")
 
 save_path.mkdir(exist_ok=True, parents=True)
-ref_s = inputs_dict['refimg'].split('/')[-1].split('.')[0]
+ref_s = inputs_dict["refimg"].split("/")[-1].split(".")[0]
 save_name = f"{save_path}/{ref_s}-a-{audio_name}-i{start_idx}"
 
-ref_image_pil = Image.open(inputs_dict['refimg']).resize((args.W, args.H))
-audio_clip = AudioFileClip(inputs_dict['audio'])
+ref_image_pil = Image.open(inputs_dict["refimg"]).resize((args.W, args.H))
+audio_clip = AudioFileClip(inputs_dict["audio"])
 
-args.L = min(int(audio_clip.duration * final_fps), len(os.listdir(inputs_dict['pose'])))
+args.L = min(int(audio_clip.duration * final_fps), len(os.listdir(inputs_dict["pose"])))
 
 pose_list = []
 for index in range(start_idx, start_idx + args.L):
-    tgt_musk = np.zeros((args.W, args.H, 3)).astype('uint8')
-    tgt_musk_path = os.path.join(inputs_dict['pose'], "{}.npy".format(index))
+    tgt_musk = np.zeros((args.W, args.H, 3)).astype("uint8")
+    tgt_musk_path = os.path.join(inputs_dict["pose"], "{}.npy".format(index))
     detected_pose = np.load(tgt_musk_path, allow_pickle=True).tolist()
-    imh_new, imw_new, rb, re, cb, ce = detected_pose['draw_pose_params']
+    imh_new, imw_new, rb, re, cb, ce = detected_pose["draw_pose_params"]
     im = draw_pose_select_v2(detected_pose, imh_new, imw_new, ref_w=800)
-    im = np.transpose(np.array(im),(1, 2, 0))
-    tgt_musk[rb:re,cb:ce,:] = im
+    im = np.transpose(np.array(im), (1, 2, 0))
+    tgt_musk[rb:re, cb:ce, :] = im
 
-    tgt_musk_pil = Image.fromarray(np.array(tgt_musk)).convert('RGB')
-    pose_list.append(torch.Tensor(np.array(tgt_musk_pil)).to(dtype=weight_dtype, device=device).permute(2,0,1) / 255.0)
+    tgt_musk_pil = Image.fromarray(np.array(tgt_musk)).convert("RGB")
+    pose_list.append(
+        torch.Tensor(np.array(tgt_musk_pil))
+        .to(dtype=weight_dtype, device=device)
+        .permute(2, 0, 1)
+        / 255.0
+    )
 
 poses_tensor = torch.stack(pose_list, dim=1).unsqueeze(0)
-audio_clip = AudioFileClip(inputs_dict['audio'])
+audio_clip = AudioFileClip(inputs_dict["audio"])
 width, height = 768, 768
 audio_clip = audio_clip.set_duration(args.L / final_fps)
+start = time.time()
 video = pipe(
     ref_image_pil,
-    inputs_dict['audio'],
-    poses_tensor[:,:,:args.L,...],
+    inputs_dict["audio"],
+    poses_tensor[:, :, : args.L, ...],
     width,
     height,
     args.L,
@@ -509,7 +498,9 @@ video = pipe(
     fps=final_fps,
     context_overlap=args.context_overlap,
     start_idx=start_idx,
-).videos 
+).videos
+end = time.time()
+print(f"-----------video-----------: {end-start}")
 
 final_length = min(video.shape[2], poses_tensor.shape[2], args.L)
 video_sig = video[:, :, :final_length, :, :]
@@ -521,8 +512,12 @@ save_videos_grid(
     fps=final_fps,
 )
 
-video_clip_sig = VideoFileClip(save_name + "_woa_sig.mp4",)
+video_clip_sig = VideoFileClip(
+    save_name + "_woa_sig.mp4",
+)
 video_clip_sig = video_clip_sig.set_audio(audio_clip)
-video_clip_sig.write_videofile(save_name + "_sig.mp4", codec="libx264", audio_codec="aac", threads=2)
+video_clip_sig.write_videofile(
+    save_name + "_sig.mp4", codec="libx264", audio_codec="aac", threads=2
+)
 os.system("rm {}".format(save_name + "_woa_sig.mp4"))
 print(save_name)
