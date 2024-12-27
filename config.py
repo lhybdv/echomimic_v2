@@ -1,0 +1,2 @@
+INPUT_DIR = "input/"
+
