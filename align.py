@@ -187,8 +187,8 @@ def get_pose_params(detected_poses, max_size):
     margin_ratio = 0.25
     h_margin = (h_max - h_min) * margin_ratio
 
-    h_min = max(h_min - h_margin * 0.8, 0)
-    h_max = min(h_max + h_margin * 0.1, 1)
+    h_min = max(h_min - h_margin * 0.65, 0)
+    h_max = min(h_max + h_margin * 0.05, 1)
 
     h_new = h_max - h_min
 
