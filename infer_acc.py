@@ -82,14 +82,14 @@ def main():
     inference_config_path = config.inference_config
     infer_config = OmegaConf.load(inference_config_path)
 
-    ############# model_init started #############
+    # model_init started 
 
-    ## vae init
+    # vae init
     vae = AutoencoderKL.from_pretrained(
         config.pretrained_vae_path,
     ).to("cuda", dtype=weight_dtype)
 
-    ## reference net init
+    # reference net init
     reference_unet = UNet2DConditionModel.from_pretrained(
         config.pretrained_base_model_path,
         subfolder="unet",
@@ -98,9 +98,9 @@ def main():
         torch.load(config.reference_unet_path, map_location="cpu"),
     )
 
-    ## denoising net init
+    # denoising net init
     if os.path.exists(config.motion_module_path):
-        ### stage1 + stage2
+        # stage1 + stage2
         denoising_unet = EMOUNet3DConditionModel.from_pretrained_2d(
             config.pretrained_base_model_path,
             config.motion_module_path,
@@ -108,7 +108,7 @@ def main():
             unet_additional_kwargs=infer_config.unet_additional_kwargs,
         ).to(dtype=weight_dtype, device=device)
     else:
-        ### only stage1
+        # only stage1
         denoising_unet = EMOUNet3DConditionModel.from_pretrained_2d(
             config.pretrained_base_model_path,
             "",
@@ -124,16 +124,16 @@ def main():
         strict=False
     )
 
-    ## face locator init
+    # face locator init
     pose_net = PoseEncoder(320, conditioning_channels=3, block_out_channels=(16, 32, 96, 256)).to(
         dtype=weight_dtype, device="cuda"
     )
     pose_net.load_state_dict(torch.load(config.pose_encoder_path))
 
-    ### load audio processor params
+    # load audio processor params
     audio_processor = load_audio_model(model_path=config.audio_model_path, device=device)
 
-    ############# model_init finished #############
+    # model_init finished 
 
     width, height = args.W, args.H
     sched_kwargs = OmegaConf.to_container(infer_config.noise_scheduler_kwargs)
@@ -173,9 +173,9 @@ def main():
         final_fps = args.fps
 
         inputs_dict = {
-        "refimg": f'{ref_image_path}',
-        "audio": f'{audio_path}',
-        "pose": f'{pose_dir}',
+            "refimg": f'{ref_image_path}',
+            "audio": f'{audio_path}',
+            "pose": f'{pose_dir}',
         }
 
         start_idx = 0
