@@ -31,7 +31,9 @@ Terminal Technology Department, Alipay, Ant Group.
 * EchoMimicV2: Towards Striking, Simplified, and Semi-Body Human Animation. [GitHub](https://github.com/antgroup/echomimic_v2)
 
 ## &#x1F4E3; Updates
-* [2025.01.03] 🔥 **One Minute is All You Need to Generate Video**.[Accelerated EchoMimicV2](https://github.com/antgroup/echomimic_v2/blob/main/infer_acc.py) are released. The inference speed can be improved by 9x (from ~7mins/120frames to ~50s/120frames on A100 GPU).
+* [2025.01.16] 🔥 Please check out the [discussions](https://github.com/antgroup/echomimic_v2/discussions) to learn how to start EchoMimicV2.
+* [2025.01.16] 🚀🔥 [GradioUI for Accelerated EchoMimicV2](https://github.com/antgroup/echomimic_v2/blob/main/app_acc.py) is now available.
+* [2025.01.03] 🚀🔥 **One Minute is All You Need to Generate Video**. [Accelerated EchoMimicV2](https://github.com/antgroup/echomimic_v2/blob/main/infer_acc.py) are released. The inference speed can be improved by 9x (from ~7mins/120frames to ~50s/120frames on A100 GPU).
 * [2024.12.16] 🔥 [RefImg-Pose Alignment Demo](https://github.com/antgroup/echomimic_v2/blob/main/demo.ipynb) is now available, which involves aligning reference image, extracting pose from driving video, and generating video.
 * [2024.11.27] 🔥 [Installation tutorial](https://www.youtube.com/watch?v=2ab6U1-nVTQ) is now available. Thanks [AiMotionStudio](https://www.youtube.com/@AiMotionStudio) for the contribution.
 * [2024.11.22] 🔥 [GradioUI](https://github.com/antgroup/echomimic_v2/blob/main/app.py) is now available. Thanks @gluttony-10 for the contribution.
@@ -199,15 +201,12 @@ The **pretrained_weights** is organized as follows.
 ├── pose_encoder.pth
 ├── sd-vae-ft-mse
 │   └── ...
-├── sd-image-variations-diffusers
-│   └── ...
 └── audio_processor
     └── tiny.pt
 ```
 
 In which **denoising_unet.pth** / **reference_unet.pth** / **motion_module.pth** / **pose_encoder.pth** are the main checkpoints of **EchoMimic**. Other models in this hub can be also downloaded from it's original hub, thanks to their brilliant works:
 - [sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse)
-- [sd-image-variations-diffusers](https://huggingface.co/lambdalabs/sd-image-variations-diffusers)
 - [audio_processor(whisper)](https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt)
 
 ### Inference on Demo 
@@ -220,7 +219,7 @@ Run the python inference script:
 python infer.py --config='./configs/prompts/infer.yaml'
 ```
 
-Run the python inference script for accelerated version:
+Run the python inference script for accelerated version. Make sure to check out the configuration for accelerated inference:
 ```bash
 python infer_acc.py --config='./configs/prompts/infer_acc.yaml'
 ```

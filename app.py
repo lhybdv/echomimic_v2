@@ -229,14 +229,14 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 with gr.Group():
                     image_input = gr.Image(label="图像输入（自动缩放）", type="filepath")
                     audio_input = gr.Audio(label="音频输入", type="filepath")
-                    pose_input = gr.Textbox(label="姿态输入（目录地址）", placeholder="请输入姿态数据的目录地址", value="assets/halfbody_demo/pose/01")
+                    pose_input = gr.Textbox(label="姿态输入（目录地址）", placeholder="请输入姿态数据的目录地址", value="assets/halfbody_demo/pose/fight")
                 with gr.Group():
                     with gr.Row():
                         width = gr.Number(label="宽度（默认768，请选择默认值）", value=768)
                         height = gr.Number(label="高度（默认768，请选择默认值）", value=768)
-                        length = gr.Number(label="视频长度，推荐240）", value=240)
+                        length = gr.Number(label="视频长度，推荐120）", value=120)
                     with gr.Row():
-                        steps = gr.Number(label="步骤（默认30）", value=20)
+                        steps = gr.Number(label="步骤（默认30）", value=30)
                         sample_rate = gr.Number(label="采样率（默认16000）", value=16000)
                         cfg = gr.Number(label="cfg（推荐2.5）", value=2.5, step=0.1)
                     with gr.Row():
@@ -252,18 +252,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 seed_text = gr.Textbox(label="种子", interactive=False, visible=False)
         gr.Examples(
             examples=[
-                ["EMTD_dataset/ref_imgs_by_FLUX/man/0001.png", "assets/halfbody_demo/audio/chinese/echomimicv2_man.wav"],
-                ["EMTD_dataset/ref_imgs_by_FLUX/woman/0077.png", "assets/halfbody_demo/audio/chinese/echomimicv2_woman.wav"],
                 ["EMTD_dataset/ref_imgs_by_FLUX/man/0003.png", "assets/halfbody_demo/audio/chinese/fighting.wav"],
                 ["EMTD_dataset/ref_imgs_by_FLUX/woman/0033.png", "assets/halfbody_demo/audio/chinese/good.wav"],
                 ["EMTD_dataset/ref_imgs_by_FLUX/man/0010.png", "assets/halfbody_demo/audio/chinese/news.wav"],
                 ["EMTD_dataset/ref_imgs_by_FLUX/man/1168.png", "assets/halfbody_demo/audio/chinese/no_smoking.wav"],
-                ["EMTD_dataset/ref_imgs_by_FLUX/woman/0057.png", "assets/halfbody_demo/audio/chinese/ultraman.wav"]
+                ["EMTD_dataset/ref_imgs_by_FLUX/woman/0057.png", "assets/halfbody_demo/audio/chinese/ultraman.wav"],
+                ["EMTD_dataset/ref_imgs_by_FLUX/man/0001.png", "assets/halfbody_demo/audio/chinese/echomimicv2_man.wav"],
+                ["EMTD_dataset/ref_imgs_by_FLUX/woman/0077.png", "assets/halfbody_demo/audio/chinese/echomimicv2_woman.wav"],
             ],
             inputs=[image_input, audio_input],  
             label="预设人物及音频",
         )
-
+    
     generate_button.click(
         generate,
         inputs=[image_input, audio_input, pose_input, width, height, length, steps, sample_rate, cfg, fps, context_frames, context_overlap, quantization_input, seed],
