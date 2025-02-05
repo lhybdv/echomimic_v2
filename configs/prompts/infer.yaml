@@ -1,6 +1,6 @@
 pretrained_base_model_path: "./pretrained_weights/sd-image-variations-diffusers"
 pretrained_vae_path: "./pretrained_weights/sd-vae-ft-mse"
-image_encoder_path: "./pretrained_weights/sd-image-variations-diffusers/image_encoder"
+
 
 denoising_unet_path: './pretrained_weights/denoising_unet.pth'
 reference_unet_path: "./pretrained_weights/reference_unet.pth"
