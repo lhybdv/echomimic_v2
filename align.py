@@ -1,30 +1,63 @@
 import argparse
 import os
 import random
+import sys
 import time
+from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
+from typing import List, TypedDict
 
 import cv2
 import decord
 import numpy as np
 import torch
+import torch.nn.functional as F
+import torchvision
 from diffusers import AutoencoderKL, DDIMScheduler
+from einops import repeat
 from moviepy.editor import AudioFileClip, VideoFileClip
 from omegaconf import OmegaConf
 from PIL import Image
 
+from config import OUTPUT_DIR
 from src.models.dwpose.dwpose_detector import dwpose_detector as dwprocessor
 from src.models.pose_encoder import PoseEncoder
 from src.models.unet_2d_condition import UNet2DConditionModel
 from src.models.unet_3d_emo import EMOUNet3DConditionModel
 from src.models.whisper.audio2feature import load_audio_model
-from src.pipelines.pipeline_echomimicv2 import EchoMimicV2Pipeline
+from src.pipelines.pipeline_echomimicv2_acc import EchoMimicV2Pipeline
 from src.utils.dwpose_util import draw_pose_select_v2
-from src.utils.util import save_videos_grid
+from src.utils.util import get_fps, read_frames, save_videos_grid
+from utils import generate_unique_filename
 
-refimg_path = "./assets/halfbody_demo/refimag/test.png"
-audio_path = "./assets/halfbody_demo/audio/chinese/echomimicv2_woman.wav"
+from dataclasses import dataclass
+
+
+@dataclass
+class Args:
+    config: str = "./configs/prompts/infer_acc.yaml"
+    W: int = 768
+    H: int = 768
+    L: int = 240
+    seed: int = 420
+    context_frames: int = 12
+    context_overlap: int = 3
+    motion_sync: int = 1
+    cfg: float = 1.0
+    steps: int = 6
+    sample_rate: int = 16000
+    fps: int = 24
+    device: str = "cuda"
+    ref_images_dir: str = "./assets/halfbody_demo/refimag"
+    audio_dir: str = "./assets/halfbody_demo/audio"
+    pose_dir: str = "./assets/halfbody_demo/pose"
+    refimg_name: str = "natural_bk_openhand/0035.png"
+    audio_name: str = "chinese/echomimicv2_woman.wav"
+    pose_name: str = "01"
+
+# refimg_path = "./assets/halfbody_demo/refimag/test.png"
+# audio_path = "./assets/halfbody_demo/audio/chinese/echomimicv2_woman.wav"
 using_video_driving = False
 if not using_video_driving:
     pose_path = "./assets/halfbody_demo/pose/01"
@@ -113,7 +146,7 @@ def resize_and_pad_param(imh, imw, max_size):
     return imh_new, imw_new, rb, re, cb, ce
 
 
-def get_pose_params(detected_poses, max_size):
+def get_pose_params(detected_poses, max_size, width, height):
     print("get_pose_params...")
     # pose rescale
     w_min_all, w_max_all, h_min_all, h_max_all = [], [], [], []
@@ -261,6 +294,7 @@ def get_img_pose(img_path: str, sample_stride: int = 1, max_frame=None):
     # read input img
     frame = cv2.imread(img_path)
     height, width, _ = frame.shape
+    print(f"heigh: {height}")
     short_size = min(height, width)
     resize_ratio = max(MAX_SIZE / short_size, 1.0)
     frame = cv2.resize(frame, (int(resize_ratio * width), int(resize_ratio * height)))
@@ -284,55 +318,7 @@ def save_aligned_img(ori_frame, video_params, max_size):
     return save_path
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="./configs/prompts/infer_acc.yaml")
-    parser.add_argument("-W", type=int, default=768)
-    parser.add_argument("-H", type=int, default=768)
-    parser.add_argument("-L", type=int, default=240)
-    parser.add_argument("--seed", type=int, default=420)
-
-    parser.add_argument("--context_frames", type=int, default=12)
-    parser.add_argument("--context_overlap", type=int, default=3)
-   
-    parser.add_argument("--motion_sync", type=int, default=1)
-
-    parser.add_argument("--cfg", type=float, default=1.0)
-    parser.add_argument("--steps", type=int, default=6)
-    parser.add_argument("--sample_rate", type=int, default=16000)
-    parser.add_argument("--fps", type=int, default=24)
-    parser.add_argument("--device", type=str, default="cuda")
-
-    parser.add_argument("--ref_images_dir", type=str, default=f'./assets/halfbody_demo/refimag')
-    parser.add_argument("--audio_dir", type=str, default='./assets/halfbody_demo/audio')
-    parser.add_argument("--pose_dir", type=str, default="./assets/halfbody_demo/pose")
-    parser.add_argument("--refimg_name", type=str, default='natural_bk_openhand/0035.png')
-    parser.add_argument("--audio_name", type=str, default='chinese/echomimicv2_woman.wav')
-    parser.add_argument("--pose_name", type=str, default="01")
-
-    args = parser.parse_args()
-
-    return args
-
-
-def create(image_path: str, audio_path: str, pose: str = "01") -> str:
-    pose_path = f"./assets/halfbody_demo/pose/{pose}"
-    start = time.time()
-    detected_poses, height, width, ori_frame = get_img_pose(image_path, max_frame=None)
-    print("image loaded! ----------------------")
-    end = time.time()
-    print(f"get_img_pose: {end-start}")
-    start = time.time()
-    res_params = get_pose_params(detected_poses, MAX_SIZE, width, height)
-    end = time.time()
-    print(f"get_pose_params: {end-start}")
-    start = time.time()
-    refimg_aligned_path = save_aligned_img(
-        ori_frame, res_params["video_params"], MAX_SIZE
-    )
-    end = time.time()
-    print(f"save_aligned_img: {end-start}")
-
+def init_ffmepg():
     ffmpeg_path = os.getenv("FFMPEG_PATH")
 
     if ffmpeg_path is None:
@@ -343,13 +329,24 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
         print("add ffmpeg to path")
         os.environ["PATH"] = f"{ffmpeg_path}:{os.environ['PATH']}"
 
-    start = time.time()
 
-    args = parse_args()
-    end = time.time()
-    print(f"parse_known_args: {end-start}")
+# def parse_args() -> Args:
+#     args = Args()
+#     return args
 
-    start = time.time()
+
+args = Args()
+device = "cuda"
+weight_dtype = torch.float16
+pipe = None
+
+
+def init_models():
+    global args
+    global device
+    global weight_dtype
+    global pipe
+
     config = OmegaConf.load(args.config)
     if config.weight_dtype == "fp16":
         weight_dtype = torch.float16
@@ -363,25 +360,12 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
     inference_config_path = config.inference_config
     infer_config = OmegaConf.load(inference_config_path)
 
-    model_flag = "{}-iter{}".format(
-        config.motion_module_path.split("/")[-2],
-        config.motion_module_path.split("/")[-1].split("-")[-1][:-4],
-    )
-    save_dir = Path(f"outputs/{model_flag}-seed{args.seed}/")
-    save_dir.mkdir(exist_ok=True, parents=True)
-    print(save_dir)
-
-    end = time.time()
-    print(f"load_config_save_seed: {end-start}")
-
-    start = time.time()
-    ############# model_init started #############
-    ## vae init
+    # vae init
     vae = AutoencoderKL.from_pretrained(
         config.pretrained_vae_path,
-    ).to(device, dtype=weight_dtype)
+    ).to("cuda", dtype=weight_dtype)
 
-    ## reference net init
+    # reference net init
     reference_unet = UNet2DConditionModel.from_pretrained(
         config.pretrained_base_model_path,
         subfolder="unet",
@@ -390,38 +374,44 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
         torch.load(config.reference_unet_path, map_location="cpu"),
     )
 
-    ## denoising net init
+    # denoising net init
     if os.path.exists(config.motion_module_path):
-        print("using motion module")
+        # stage1 + stage2
+        denoising_unet = EMOUNet3DConditionModel.from_pretrained_2d(
+            config.pretrained_base_model_path,
+            config.motion_module_path,
+            subfolder="unet",
+            unet_additional_kwargs=infer_config.unet_additional_kwargs,
+        ).to(dtype=weight_dtype, device=device)
     else:
-        exit("motion module not found")
-        ### stage1 + stage2
-    denoising_unet = EMOUNet3DConditionModel.from_pretrained_2d(
-        config.pretrained_base_model_path,
-        config.motion_module_path,
-        subfolder="unet",
-        unet_additional_kwargs=infer_config.unet_additional_kwargs,
-    ).to(dtype=weight_dtype, device=device)
-
+        # only stage1
+        denoising_unet = EMOUNet3DConditionModel.from_pretrained_2d(
+            config.pretrained_base_model_path,
+            "",
+            subfolder="unet",
+            unet_additional_kwargs={
+                "use_motion_module": False,
+                "unet_use_temporal_attention": False,
+                "cross_attention_dim": infer_config.unet_additional_kwargs.cross_attention_dim,
+            },
+        ).to(dtype=weight_dtype, device=device)
     denoising_unet.load_state_dict(
         torch.load(config.denoising_unet_path, map_location="cpu"), strict=False
     )
 
-    # pose net init
+    # face locator init
     pose_net = PoseEncoder(
         320, conditioning_channels=3, block_out_channels=(16, 32, 96, 256)
-    ).to(dtype=weight_dtype, device=device)
+    ).to(dtype=weight_dtype, device="cuda")
     pose_net.load_state_dict(torch.load(config.pose_encoder_path))
 
-    ### load audio processor params
+    # load audio processor params
     audio_processor = load_audio_model(
         model_path=config.audio_model_path, device=device
     )
 
-    end = time.time()
-    print(f"load_module: {end-start}")
-    ############# model_init finished #############
-    width, height = 768, 768  # fixed size
+    # model_init finished
+
     sched_kwargs = OmegaConf.to_container(infer_config.noise_scheduler_kwargs)
     scheduler = DDIMScheduler(**sched_kwargs)
 
@@ -434,23 +424,32 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
         scheduler=scheduler,
     )
 
-    start = time.time()
-    pipe = pipe.to(device, dtype=weight_dtype)
+    pipe = pipe.to("cuda", dtype=weight_dtype)
 
-    end = time.time()
-    print(f"pipe: {end-start}")
+
+def create(image_path: str, audio_path: str, pose: str = "01") -> str:
+    pose_path = f"./assets/halfbody_demo/pose/{pose}"
+    detected_poses, height, width, ori_frame = get_img_pose(image_path, max_frame=None)
+
+    res_params = get_pose_params(detected_poses, MAX_SIZE, width, height)
+
+    refimg_aligned_path = save_aligned_img(
+        ori_frame, res_params["video_params"], MAX_SIZE
+    )
 
     if args.seed is not None and args.seed > -1:
         generator = torch.manual_seed(args.seed)
     else:
         generator = torch.manual_seed(random.randint(100, 1000000))
 
+    # ref_name = Path(image_path).stem
+    # audio_name = Path(audio_path).stem
     final_fps = args.fps
 
     inputs_dict = {
-        "refimg": refimg_aligned_path,
-        "audio": audio_path,
-        "pose": pose_path,
+        "refimg": f"{refimg_aligned_path}",
+        "audio": f"{audio_path}",
+        "pose": f"{pose_path}",
     }
 
     start_idx = 0
@@ -458,26 +457,20 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
     print("Pose:", inputs_dict["pose"])
     print("Reference:", inputs_dict["refimg"])
     print("Audio:", inputs_dict["audio"])
-    audio_name = inputs_dict["audio"].split("/")[-1].split(".")[0]
 
-    ref_flag = ".".join(
-        [inputs_dict["refimg"].split("/")[-2], inputs_dict["refimg"].split("/")[-1]]
-    )
-    save_path = Path("outputs")
+    # save_path = Path(f"{}/{ref_name}")
+    # save_path.mkdir(exist_ok=True, parents=True)
+    # save_name = f"{save_path}/{ref_name}-a-{audio_name}-i{start_idx}"
 
-    save_path.mkdir(exist_ok=True, parents=True)
-    ref_s = inputs_dict["refimg"].split("/")[-1].split(".")[0]
-    # save_name = f"{save_path}/{ref_s}-a-{audio_name}-i{start_idx}"
-    filename = generate_unique_filename()
-    save_name = f"{OUTPUT_DIR.rstrip('/')}/{filename}"
-
-    ref_image_pil = Image.open(inputs_dict["refimg"]).resize((args.W, args.H))
+    ref_img_pil = Image.open(inputs_dict["refimg"]).convert("RGB")
     audio_clip = AudioFileClip(inputs_dict["audio"])
 
     args.L = min(
-        int(audio_clip.duration * final_fps), len(os.listdir(inputs_dict["pose"]))
+        args.L,
+        int(audio_clip.duration * final_fps),
+        len(os.listdir(inputs_dict["pose"])),
     )
-
+    # ==================== face_locator =====================
     pose_list = []
     for index in range(start_idx, start_idx + args.L):
         tgt_musk = np.zeros((args.W, args.H, 3)).astype("uint8")
@@ -498,11 +491,11 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
 
     poses_tensor = torch.stack(pose_list, dim=1).unsqueeze(0)
     audio_clip = AudioFileClip(inputs_dict["audio"])
-    width, height = 768, 768
     audio_clip = audio_clip.set_duration(args.L / final_fps)
-    start = time.time()
+
+    width, height = args.W, args.H
     video = pipe(
-        ref_image_pil,
+        ref_img_pil,
         inputs_dict["audio"],
         poses_tensor[:, :, : args.L, ...],
         width,
@@ -512,31 +505,37 @@ def create(image_path: str, audio_path: str, pose: str = "01") -> str:
         args.cfg,
         generator=generator,
         audio_sample_rate=args.sample_rate,
-        context_frames=args.context_frames,
+        context_frames=12,
         fps=final_fps,
         context_overlap=args.context_overlap,
         start_idx=start_idx,
     ).videos
-    end = time.time()
-    print(f"-----------video-----------: {end-start}")
 
     final_length = min(video.shape[2], poses_tensor.shape[2], args.L)
-    video_sig = video[:, :, :final_length, :, :]
 
+    video_sig = video[:, :, :final_length, :, :]
+    save_name = generate_unique_filename()
+    save_path = f"{OUTPUT_DIR.rstrip('/')}/{save_name}"
+    print(f"save_path:{save_path}")
     save_videos_grid(
         video_sig,
-        save_name + "_woa_sig.mp4",
+        save_path + "_woa_sig.mp4",
         n_rows=1,
         fps=final_fps,
     )
 
     video_clip_sig = VideoFileClip(
-        save_name + "_woa_sig.mp4",
+        save_path + "_woa_sig.mp4",
     )
     video_clip_sig = video_clip_sig.set_audio(audio_clip)
     video_clip_sig.write_videofile(
-        save_name + ".mp4", codec="libx264", audio_codec="aac", threads=2
+        save_path + ".mp4", codec="libx264", audio_codec="aac", threads=2
     )
-    os.system("rm {}".format(save_name + "_woa_sig.mp4"))
+    os.system("rm {}".format(save_path + "_woa_sig.mp4"))
     print(save_name)
+
     return f"{save_name}.mp4"
+
+
+init_ffmepg()
+init_models()
